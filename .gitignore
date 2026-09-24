@@ -1,0 +1,6 @@
+.env
+admins.txt
+dobro_stars.db
+__pycache__/
+*.pyc
+bot.py
