@@ -1,4 +1,308 @@
+import asyncio
+import os
+import re
+import random
+import sqlite3
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command
+from aiogram.types import Message
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+
+from words import GOOD_WORDS, BAD_WORDS
+
+load_dotenv()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 # ============================================================
+# НАСТРОЙКИ
+# ============================================================
+AUTO_STARS_ENABLED = True
+DEBUG_AUTO = False
+MAX_PLUS_PER_HOUR = 3
+MAX_PLUS_PER_DAY = 20
+SAME_WORD_COOLDOWN_HOURS = 6
+SAME_BAD_WORD_COOLDOWN_MINUTES = 1
+
+CASINO_MIN_BET = 10
+CASINO_MAX_BET = 2000
+
+DICE_MIN_BET = 10
+DICE_MAX_BET = 5000
+
+STEAL_COOLDOWN_HOURS = 24
+STEAL_MIN_BALANCE = 50
+STEAL_SUCCESS_CHANCE = 0.4
+STEAL_MIN_AMOUNT = 5
+STEAL_MAX_AMOUNT = 20
+STEAL_FAIL_PENALTY = 10
+
+# Хранилище активных вызовов на кости
+# { chat_id: { target_id: {"challenger_id": ..., "bet": N, "challenger_name": ...} } }
+pending_duels = {}
+
+
+# ============================================================
+# АДМИНЫ
+# ============================================================
+def load_admins():
+    ids = set()
+    for x in os.getenv("ADMIN_IDS", "").split(","):
+        x = x.strip()
+        if x.isdigit():
+            ids.add(int(x))
+    if os.path.exists("admins.txt"):
+        with open("admins.txt", "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.isdigit():
+                    ids.add(int(line))
+    return ids
+
+
+def save_admin(uid):
+    if uid in load_admins():
+        return False
+    with open("admins.txt", "a", encoding="utf-8") as f:
+        f.write(f"\n{uid}")
+    return True
+
+
+def remove_admin(uid):
+    if not os.path.exists("admins.txt"):
+        return False
+    with open("admins.txt", "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    new = [l for l in lines if l.strip() != str(uid)]
+    if len(new) == len(lines):
+        return False
+    with open("admins.txt", "w", encoding="utf-8") as f:
+        f.writelines(new)
+    return True
+
+
+def is_admin(uid):
+    return uid in load_admins()
+
+
+# ============================================================
+# СЕЗОНЫ
+# ============================================================
+def get_season_start(now=None):
+    if now is None:
+        now = datetime.now()
+    days_since_friday = (now.weekday() - 4) % 7
+    friday = now - timedelta(days=days_since_friday)
+    return friday.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def get_season_end(now=None):
+    return get_season_start(now) + timedelta(days=7)
+
+
+# ============================================================
+# БОТ И БАЗА
+# ============================================================
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+dp = Dispatcher()
+
+db = sqlite3.connect("dobro_stars.db")
+cursor = db.cursor()
+
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER, chat_id INTEGER, username TEXT,
+        stars INTEGER DEFAULT 0,
+        good_words INTEGER DEFAULT 0,
+        bad_words INTEGER DEFAULT 0,
+        PRIMARY KEY (user_id, chat_id)
+    )
+""")
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER, target_id INTEGER, target_name TEXT,
+        amount INTEGER, reason TEXT, created_at TEXT
+    )
+""")
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS season_stats (
+        user_id INTEGER, chat_id INTEGER,
+        season_start TEXT,
+        won INTEGER DEFAULT 0,
+        lost INTEGER DEFAULT 0,
+        good_words INTEGER DEFAULT 0,
+        bad_words INTEGER DEFAULT 0,
+        PRIMARY KEY (user_id, chat_id, season_start)
+    )
+""")
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS casino_stats (
+        user_id INTEGER, chat_id INTEGER,
+        won_total INTEGER DEFAULT 0,
+        lost_total INTEGER DEFAULT 0,
+        PRIMARY KEY (user_id, chat_id)
+    )
+""")
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS steal_cooldowns (
+        thief_id INTEGER, target_id INTEGER, chat_id INTEGER,
+        last_steal TEXT,
+        PRIMARY KEY (thief_id, target_id, chat_id)
+    )
+""")
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS last_weekly_report (
+        chat_id INTEGER PRIMARY KEY,
+        last_report TEXT
+    )
+""")
+db.commit()
+
+
+# ============================================================
+# БД ФУНКЦИИ
+# ============================================================
+def ensure_user(uid, cid, un):
+    cursor.execute("""
+        INSERT INTO users (user_id, chat_id, username, stars) VALUES (?, ?, ?, 0)
+        ON CONFLICT(user_id, chat_id) DO UPDATE SET username=?
+    """, (uid, cid, un, un))
+    db.commit()
+
+
+def get_stars(uid, cid):
+    cursor.execute("SELECT stars FROM users WHERE user_id=? AND chat_id=?", (uid, cid))
+    r = cursor.fetchone()
+    return r[0] if r else 0
+
+
+def update_stars(uid, cid, un, amount):
+    ensure_user(uid, cid, un)
+    new = get_stars(uid, cid) + amount
+    cursor.execute("UPDATE users SET stars=? WHERE user_id=? AND chat_id=?", (new, uid, cid))
+    db.commit()
+    return new
+
+
+def add_log(cid, tid, tn, amount, reason):
+    cursor.execute("""
+        INSERT INTO logs (chat_id, target_id, target_name, amount, reason, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (cid, tid, tn, amount, reason, datetime.now().isoformat()))
+    db.commit()
+
+
+def inc_word_stat(uid, cid, un, is_good):
+    ensure_user(uid, cid, un)
+    col = "good_words" if is_good else "bad_words"
+    cursor.execute(f"UPDATE users SET {col} = {col} + 1 WHERE user_id=? AND chat_id=?", (uid, cid))
+    db.commit()
+
+
+def get_user_word_stats(uid, cid):
+    cursor.execute("SELECT good_words, bad_words FROM users WHERE user_id=? AND chat_id=?", (uid, cid))
+    r = cursor.fetchone()
+    return r if r else (0, 0)
+
+
+def update_season_stat(uid, cid, un, won=0, lost=0, good=0, bad=0):
+    season = get_season_start().isoformat()
+    ensure_user(uid, cid, un)
+    cursor.execute("""
+        INSERT INTO season_stats (user_id, chat_id, season_start) VALUES (?, ?, ?)
+        ON CONFLICT(user_id, chat_id, season_start) DO NOTHING
+    """, (uid, cid, season))
+    cursor.execute("""
+        UPDATE season_stats SET
+            won = won + ?, lost = lost + ?,
+            good_words = good_words + ?, bad_words = bad_words + ?
+        WHERE user_id=? AND chat_id=? AND season_start=?
+    """, (won, lost, good, bad, uid, cid, season))
+    db.commit()
+
+
+def get_season_stats(uid, cid):
+    season = get_season_start().isoformat()
+    cursor.execute("""
+        SELECT won, lost, good_words, bad_words FROM season_stats
+        WHERE user_id=? AND chat_id=? AND season_start=?
+    """, (uid, cid, season))
+    r = cursor.fetchone()
+    return r if r else (0, 0, 0, 0)
+
+
+def update_casino_stats(uid, cid, won=0, lost=0):
+    cursor.execute("""
+        INSERT INTO casino_stats (user_id, chat_id, won_total, lost_total)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id, chat_id) DO UPDATE SET
+            won_total = won_total + ?, lost_total = lost_total + ?
+    """, (uid, cid, won, lost, won, lost))
+    db.commit()
+
+
+def get_casino_stats(uid, cid):
+    cursor.execute("SELECT won_total, lost_total FROM casino_stats WHERE user_id=? AND chat_id=?", (uid, cid))
+    r = cursor.fetchone()
+    return r if r else (0, 0)
+
+
+# ============================================================
+# ЛОГИКА СЛОВ
+# ============================================================
+def has_word(text, word):
+    t = text.lower()
+    if " " in word:
+        return re.search(rf"(?<!\w){re.escape(word)}(?!\w)", t) is not None
+    if len(word) <= 3:
+        return re.search(rf"(?<!\w){re.escape(word)}(?!\w)", t) is not None
+    pattern = rf"(?<!\w){re.escape(word)}(а|у|ом|ем|е|ы|и|ов|ев|ам|ям|ами|ями|ах|ях|ой|ей|ою|ею)?(?!\w)"
+    return re.search(pattern, t) is not None
+
+
+def find_best_word(text, words_dict):
+    best_w, best_v = None, 0
+    for w, v in words_dict.items():
+        if has_word(text, w) and v > best_v:
+            best_w, best_v = w, v
+    return best_w, best_v
+
+
+# ============================================================
+# АНТИФАРМ
+# ============================================================
+def plus_count_last_hour(uid, cid):
+    cutoff = (datetime.now() - timedelta(hours=1)).isoformat()
+    cursor.execute("""
+        SELECT COUNT(*) FROM logs WHERE target_id=? AND chat_id=?
+        AND amount > 0 AND reason LIKE 'авто:%' AND created_at > ?
+    """, (uid, cid, cutoff))
+    return cursor.fetchone()[0]
+
+
+def plus_sum_last_day(uid, cid):
+    cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+    cursor.execute("""
+        SELECT COALESCE(SUM(amount), 0) FROM logs WHERE target_id=? AND chat_id=?
+        AND amount > 0 AND reason LIKE 'авто:%' AND created_at > ?
+    """, (uid, cid, cutoff))
+    return cursor.fetchone()[0]
+
+
+def same_word_used_recently(uid, cid, word, minutes):
+    cutoff = (datetime.now() - timedelta(minutes=minutes)).isoformat()
+    cursor.execute("""
+        SELECT COUNT(*) FROM logs WHERE target_id=? AND chat_id=?
+        AND reason LIKE ? AND created_at > ?
+    """, (uid, cid, f"%«{word}»%", cutoff))
+    return cursor.fetchone()[0] > 0
+    # ============================================================
 # КОМАНДЫ
 # ============================================================
 
