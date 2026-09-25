@@ -16,11 +16,16 @@ from words import GOOD_WORDS, BAD_WORDS
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+print("=" * 50)
+print("ЗАГРУЗКА APP.PY")
+print(f"BOT_TOKEN: {'задан' if BOT_TOKEN else 'НЕ ЗАДАН!!!'}")
+print("=" * 50)
+
 # ============================================================
 # НАСТРОЙКИ
 # ============================================================
 AUTO_STARS_ENABLED = True
-DEBUG_AUTO = False
+DEBUG_AUTO = True
 MAX_PLUS_PER_HOUR = 3
 MAX_PLUS_PER_DAY = 20
 SAME_WORD_COOLDOWN_HOURS = 6
@@ -28,10 +33,8 @@ SAME_BAD_WORD_COOLDOWN_MINUTES = 1
 
 CASINO_MIN_BET = 10
 CASINO_MAX_BET = 2000
-
 DICE_MIN_BET = 10
 DICE_MAX_BET = 5000
-
 STEAL_COOLDOWN_HOURS = 24
 STEAL_MIN_BALANCE = 50
 STEAL_SUCCESS_CHANCE = 0.4
@@ -39,8 +42,6 @@ STEAL_MIN_AMOUNT = 5
 STEAL_MAX_AMOUNT = 20
 STEAL_FAIL_PENALTY = 10
 
-# Хранилище активных вызовов на кости
-# { chat_id: { target_id: {"challenger_id": ..., "bet": N, "challenger_name": ...} } }
 pending_duels = {}
 
 
@@ -134,18 +135,15 @@ cursor.execute("""
     CREATE TABLE IF NOT EXISTS season_stats (
         user_id INTEGER, chat_id INTEGER,
         season_start TEXT,
-        won INTEGER DEFAULT 0,
-        lost INTEGER DEFAULT 0,
-        good_words INTEGER DEFAULT 0,
-        bad_words INTEGER DEFAULT 0,
+        won INTEGER DEFAULT 0, lost INTEGER DEFAULT 0,
+        good_words INTEGER DEFAULT 0, bad_words INTEGER DEFAULT 0,
         PRIMARY KEY (user_id, chat_id, season_start)
     )
 """)
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS casino_stats (
         user_id INTEGER, chat_id INTEGER,
-        won_total INTEGER DEFAULT 0,
-        lost_total INTEGER DEFAULT 0,
+        won_total INTEGER DEFAULT 0, lost_total INTEGER DEFAULT 0,
         PRIMARY KEY (user_id, chat_id)
     )
 """)
@@ -254,6 +252,43 @@ def get_casino_stats(uid, cid):
 
 
 # ============================================================
+# ПОИСК ПОЛЬЗОВАТЕЛЯ ПО @НИКУ
+# ============================================================
+def find_user_by_username(un, cid):
+    if not un:
+        return None
+    un = un.lstrip("@").strip()
+    if not un:
+        return None
+    # точное (без регистра)
+    cursor.execute("""
+        SELECT user_id, username FROM users
+        WHERE chat_id=? AND LOWER(username)=LOWER(?)
+    """, (cid, un))
+    row = cursor.fetchone()
+    if row:
+        return row
+    # точное с @
+    cursor.execute("""
+        SELECT user_id, username FROM users
+        WHERE chat_id=? AND LOWER(username)=LOWER(?)
+    """, (cid, "@" + un))
+    row = cursor.fetchone()
+    if row:
+        return row
+    # подстрока
+    cursor.execute("""
+        SELECT user_id, username FROM users
+        WHERE chat_id=? AND LOWER(username) LIKE ?
+        ORDER BY LENGTH(username) ASC LIMIT 1
+    """, (cid, f"%{un.lower()}%"))
+    row = cursor.fetchone()
+    if row:
+        return row
+    return None
+
+
+# ============================================================
 # ЛОГИКА СЛОВ
 # ============================================================
 def has_word(text, word):
@@ -308,31 +343,21 @@ def same_word_used_recently(uid, cid, word, minutes):
 
 @dp.message(Command("start", "help", "помощь"))
 async def cmd_help(m: Message):
+    print(f"[CMD] /start от {m.from_user.full_name}")
     await m.answer(
         "👋 <b>Бот Добро-Звёзды</b>\n\n"
-        "📌 <b>Общее:</b>\n"
-        "/профиль — свой профиль\n"
-        "/профиль (ответом) — чужой\n"
-        "/таблица — топ по звёздам\n"
-        "/антитоп — самый злой\n"
-        "/топ_сезона — топы за эту неделю\n"
+        "/профиль — профиль\n"
+        "/таблица — топ\n"
+        "/антитоп — топ злых\n"
+        "/топ_сезона — топы за неделю\n"
         "/сезон — инфо о сезоне\n"
-        "/сводка — отчёт за неделю\n"
+        "/сводка — отчёт за прошлую неделю\n"
         "/тест_авто фраза\n\n"
-        "🎲 <b>Игры:</b>\n"
-        "/рулетка 100 красное — ставка на цвет\n"
-        "  (красное ×2, чёрное ×2, чёт ×2, нечет ×2, зеро ×14, число ×36)\n"
-        "/кости @ник 100 — вызов на дуэль (1 кубик)\n"
-        "/принять — принять вызов\n"
-        "/отклонить — отклонить\n"
-        "/украсть @ник — попытка кражи\n\n"
-        "🛠 <b>Админам:</b>\n"
-        "/добро N @ник причина\n"
-        "/зло N @ник причина\n"
-        "/авто вкл|выкл\n"
-        "/админ @ник\n"
-        "/разжаловать @ник\n"
-        "/логи"
+        "🎲 /рулетка 100 красное\n"
+        "🎲 /кости @ник 100 / /принять / /отклонить\n"
+        "🥷 /украсть @ник\n\n"
+        "🛠 /добро N @ник причина | /зло N @ник причина\n"
+        "/авто вкл|выкл | /админ | /разжаловать | /логи"
     )
 
 
@@ -360,6 +385,7 @@ async def cmd_test(m: Message):
 @dp.message(Command("авто"))
 async def cmd_auto(m: Message):
     global AUTO_STARS_ENABLED
+    print(f"[CMD] /авто от {m.from_user.full_name}")
     if not is_admin(m.from_user.id):
         await m.reply("❌ Только админы.")
         return
@@ -375,16 +401,12 @@ async def cmd_auto(m: Message):
 async def cmd_season(m: Message):
     start = get_season_start()
     end = get_season_end()
-    now = datetime.now()
-    left = end - now
-    days = left.days
-    hours = left.seconds // 3600
+    left = end - datetime.now()
     await m.reply(
-        f"📅 <b>Текущий сезон</b>\n\n"
+        f"📅 <b>Сезон</b>\n"
         f"Начало: <b>{start.strftime('%d.%m.%Y %H:%M')}</b>\n"
         f"Конец: <b>{end.strftime('%d.%m.%Y %H:%M')}</b>\n"
-        f"Осталось: <b>{days}д {hours}ч</b>\n\n"
-        f"Новый сезон стартует каждую пятницу в 00:00."
+        f"Осталось: <b>{left.days}д {left.seconds//3600}ч</b>"
     )
 
 
@@ -395,7 +417,6 @@ async def cmd_profile(m: Message):
     gw, bw = get_user_word_stats(t.id, m.chat.id)
     cw, cl = get_casino_stats(t.id, m.chat.id)
     sw, sl, sg, sb = get_season_stats(t.id, m.chat.id)
-
     if s < 0:
         e = "💀"
     elif s == 0:
@@ -408,22 +429,13 @@ async def cmd_profile(m: Message):
         e = "🌟"
     else:
         e = "👑"
-
     await m.reply(
-        f"{e} <b>Профиль {t.full_name}</b>\n"
+        f"{e} <b>{t.full_name}</b>\n"
         f"🆔 <code>{t.id}</code>\n\n"
-        f"⭐ <b>Баланс:</b> {s}\n\n"
-        f"📝 <b>Слова (всего):</b>\n"
-        f"  ✅ Хороших: {gw}\n"
-        f"  ❌ Плохих: {bw}\n\n"
-        f"🎰 <b>Казино (всё время):</b>\n"
-        f"  Выиграно: {cw}\n"
-        f"  Проиграно: {cl}\n\n"
-        f"📅 <b>За этот сезон:</b>\n"
-        f"  🎰 Выиграно: {sw}\n"
-        f"  🎰 Проиграно: {sl}\n"
-        f"  ✅ Хороших слов: {sg}\n"
-        f"  ❌ Плохих слов: {sb}"
+        f"⭐ Баланс: <b>{s}</b>\n\n"
+        f"📝 Слова всего: ✅ {gw} | ❌ {bw}\n\n"
+        f"🎰 Казино всего: +{cw} / −{cl}\n"
+        f"📅 Сезон: 🎰 +{sw} / −{sl}, ✅ {sg} | ❌ {sb}"
     )
 
 
@@ -473,16 +485,14 @@ async def cmd_antitop(m: Message):
 @dp.message(Command("топ_сезона"))
 async def cmd_season_top(m: Message):
     season = get_season_start().isoformat()
-    text = "📅 <b>Топы за текущий сезон</b>\n\n"
-
-    # Топ по доброте (good_words)
+    text = "📅 <b>Топы за сезон</b>\n\n"
     cursor.execute("""
         SELECT user_id, good_words FROM season_stats
         WHERE chat_id=? AND season_start=? AND good_words > 0
         ORDER BY good_words DESC LIMIT 5
     """, (m.chat.id, season))
     rows = cursor.fetchall()
-    text += "✅ <b>Самые добрые:</b>\n"
+    text += "✅ <b>Добрые:</b>\n"
     if rows:
         for i, (uid, gw) in enumerate(rows, start=1):
             try:
@@ -490,18 +500,16 @@ async def cmd_season_top(m: Message):
                 name = mm.user.full_name
             except Exception:
                 name = f"ID {uid}"
-            text += f"  {i}. {name} — {gw} хороших слов\n"
+            text += f"  {i}. {name} — {gw}\n"
     else:
         text += "  пусто\n"
-
-    # Топ по злу
     cursor.execute("""
         SELECT user_id, bad_words FROM season_stats
         WHERE chat_id=? AND season_start=? AND bad_words > 0
         ORDER BY bad_words DESC LIMIT 5
     """, (m.chat.id, season))
     rows = cursor.fetchall()
-    text += "\n❌ <b>Самые злые:</b>\n"
+    text += "\n❌ <b>Злые:</b>\n"
     if rows:
         for i, (uid, bw) in enumerate(rows, start=1):
             try:
@@ -509,31 +517,9 @@ async def cmd_season_top(m: Message):
                 name = mm.user.full_name
             except Exception:
                 name = f"ID {uid}"
-            text += f"  {i}. {name} — {bw} плохих слов\n"
+            text += f"  {i}. {name} — {bw}\n"
     else:
         text += "  пусто\n"
-
-    # Топ казино за сезон
-    cursor.execute("""
-        SELECT user_id, won, lost FROM season_stats
-        WHERE chat_id=? AND season_start=? AND (won > 0 OR lost > 0)
-        ORDER BY (won - lost) DESC LIMIT 5
-    """, (m.chat.id, season))
-    rows = cursor.fetchall()
-    text += "\n🎰 <b>Казино (баланс выигрыш-проигрыш):</b>\n"
-    if rows:
-        for i, (uid, w, l) in enumerate(rows, start=1):
-            try:
-                mm = await bot.get_chat_member(m.chat.id, uid)
-                name = mm.user.full_name
-            except Exception:
-                name = f"ID {uid}"
-            diff = w - l
-            sign = "+" if diff >= 0 else ""
-            text += f"  {i}. {name} — {sign}{diff}\n"
-    else:
-        text += "  пусто\n"
-
     await m.reply(text)
 
 
@@ -561,8 +547,6 @@ async def cmd_logs(m: Message):
     await m.reply(text)
 
 
-# --- Управление админами ---
-
 @dp.message(Command("админ"))
 async def cmd_add_admin(m: Message):
     if not is_admin(m.from_user.id):
@@ -574,9 +558,7 @@ async def cmd_add_admin(m: Message):
     else:
         p = (m.text or "").split(maxsplit=1)
         if len(p) >= 2 and p[1].startswith("@"):
-            un = p[1].lstrip("@")
-            cursor.execute("SELECT user_id, username FROM users WHERE username=? AND chat_id=?", (un, m.chat.id))
-            row = cursor.fetchone()
+            row = find_user_by_username(p[1], m.chat.id)
             if row:
                 tid, tn = row
                 target = type("U", (), {"id": tid, "full_name": tn, "username": tn})()
@@ -600,9 +582,7 @@ async def cmd_remove_admin(m: Message):
     else:
         p = (m.text or "").split(maxsplit=1)
         if len(p) >= 2 and p[1].startswith("@"):
-            un = p[1].lstrip("@")
-            cursor.execute("SELECT user_id, username FROM users WHERE username=? AND chat_id=?", (un, m.chat.id))
-            row = cursor.fetchone()
+            row = find_user_by_username(p[1], m.chat.id)
             if row:
                 tid, tn = row
                 target = type("U", (), {"id": tid, "full_name": tn, "username": tn})()
@@ -618,28 +598,22 @@ async def cmd_remove_admin(m: Message):
         await m.reply(f"ℹ️ И так не админ.")
 
 
-# --- Ручные выдачи ---
-
 def parse_manual(message: Message):
     text = message.text or ""
     parts = text.split(maxsplit=3)
     amount = 1
     target = None
     reason = None
-
     if len(parts) >= 2 and parts[1].lstrip("-").isdigit():
         amount = max(1, abs(int(parts[1])))
         rest = parts[2:]
     else:
         rest = parts[1:]
-
     if message.reply_to_message:
         target = message.reply_to_message.from_user
         reason = " ".join(rest) if rest else None
     elif rest and rest[0].startswith("@"):
-        un = rest[0].lstrip("@")
-        cursor.execute("SELECT user_id, username FROM users WHERE username=? AND chat_id=?", (un, message.chat.id))
-        row = cursor.fetchone()
+        row = find_user_by_username(rest[0], message.chat.id)
         if row:
             tid, tn = row
             target = type("U", (), {"id": tid, "full_name": tn, "username": tn})()
@@ -647,7 +621,6 @@ def parse_manual(message: Message):
     else:
         target = message.from_user
         reason = " ".join(rest) if rest else None
-
     return amount, target, reason
 
 
@@ -658,7 +631,7 @@ async def cmd_dobro(m: Message):
         return
     amount, target, reason = parse_manual(m)
     if target is None:
-        await m.reply("Не нашёл пользователя. Ответь на сообщение или укажи @ник.")
+        await m.reply("Не нашёл. Ответь на сообщение или укажи @ник.")
         return
     reason = reason or "хорошие слова"
     new = update_stars(target.id, m.chat.id, target.username or target.full_name, amount)
@@ -673,15 +646,13 @@ async def cmd_zlo(m: Message):
         return
     amount, target, reason = parse_manual(m)
     if target is None:
-        await m.reply("Не нашёл пользователя.")
+        await m.reply("Не нашёл.")
         return
     reason = reason or "плохие слова"
     new = update_stars(target.id, m.chat.id, target.username or target.full_name, -amount)
     add_log(m.chat.id, target.id, target.full_name, -amount, f"ручное снятие: {reason}")
     await m.reply(f"😔 <b>{target.full_name}</b> −{amount} ⭐\nПричина: {reason}\nБаланс: <b>{new}</b> ⭐")
-
-
-# ============================================================
+    # ============================================================
 # КАЗИНО — РУЛЕТКА
 # ============================================================
 RED_NUMBERS = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
@@ -692,95 +663,67 @@ async def cmd_roulette(m: Message):
     p = (m.text or "").split(maxsplit=2)
     if len(p) < 3:
         await m.reply(
-            "Использование: <code>/рулетка 100 красное</code>\n\n"
-            "Ставки:\n"
-            "• <b>красное</b> ×2\n"
-            "• <b>чёрное</b> ×2\n"
-            "• <b>чет</b> ×2\n"
-            "• <b>нечет</b> ×2\n"
-            "• <b>зеро</b> ×14\n"
-            "• число <b>0-36</b> ×36\n\n"
-            f"Ставка: от {CASINO_MIN_BET} до {CASINO_MAX_BET}"
+            "Использование: <code>/рулетка 100 красное</code>\n"
+            "красное/чёрное ×2, чет/нечет ×2, зеро ×14, число ×36.\n"
+            f"Ставка {CASINO_MIN_BET}–{CASINO_MAX_BET}"
         )
         return
-
     try:
         bet = int(p[1])
     except ValueError:
         await m.reply("Ставка должна быть числом.")
         return
-
     if bet < CASINO_MIN_BET or bet > CASINO_MAX_BET:
         await m.reply(f"Ставка от {CASINO_MIN_BET} до {CASINO_MAX_BET}.")
         return
-
     choice = p[2].strip().lower()
     uid, cid, name = m.from_user.id, m.chat.id, m.from_user.username or m.from_user.full_name
-
-    # Проверка баланса
-    current = get_stars(uid, cid)
-    if current < bet:
-        await m.reply(f"У тебя только {current} ⭐, а ставка {bet}.")
+    if get_stars(uid, cid) < bet:
+        await m.reply("Недостаточно звёзд.")
         return
-
     roll = random.randint(0, 36)
     color = "красное" if roll in RED_NUMBERS else ("чёрное" if roll != 0 else "зеро")
     parity = "чет" if roll != 0 and roll % 2 == 0 else ("нечет" if roll != 0 else "зеро")
-
     win = False
-    multiplier = 0
-
+    mult = 0
     if choice == "красное" and color == "красное":
-        win, multiplier = True, 2
+        win, mult = True, 2
     elif choice == "чёрное" and color == "чёрное":
-        win, multiplier = True, 2
+        win, mult = True, 2
     elif choice == "чет" and parity == "чет":
-        win, multiplier = True, 2
+        win, mult = True, 2
     elif choice == "нечет" and parity == "нечет":
-        win, multiplier = True, 2
+        win, mult = True, 2
     elif choice == "зеро" and roll == 0:
-        win, multiplier = True, 14
+        win, mult = True, 14
     elif choice.isdigit() and int(choice) == roll:
-        win, multiplier = True, 36
-
+        win, mult = True, 36
     if win:
-        profit = bet * (multiplier - 1)
+        profit = bet * (mult - 1)
         new = update_stars(uid, cid, name, profit)
         update_casino_stats(uid, cid, won=profit)
         update_season_stat(uid, cid, name, won=profit)
-        add_log(cid, uid, name, profit, f"казино: выигрыш {profit}")
-        await m.reply(
-            f"🎰 Выпало: <b>{roll}</b> ({color}, {parity})\n\n"
-            f"🎉 <b>Победа!</b> +{profit} ⭐\n"
-            f"Баланс: <b>{new}</b> ⭐"
-        )
+        add_log(cid, uid, name, profit, f"казино: +{profit}")
+        await m.reply(f"🎰 Выпало {roll} ({color}, {parity})\n🎉 +{profit} ⭐\nБаланс: <b>{new}</b>")
     else:
         new = update_stars(uid, cid, name, -bet)
         update_casino_stats(uid, cid, lost=bet)
         update_season_stat(uid, cid, name, lost=bet)
-        add_log(cid, uid, name, -bet, f"казино: проигрыш {bet}")
-        await m.reply(
-            f"🎰 Выпало: <b>{roll}</b> ({color}, {parity})\n\n"
-            f"😔 <b>Проигрыш.</b> −{bet} ⭐\n"
-            f"Баланс: <b>{new}</b> ⭐"
-        )
+        add_log(cid, uid, name, -bet, f"казино: −{bet}")
+        await m.reply(f"🎰 Выпало {roll} ({color}, {parity})\n😔 −{bet} ⭐\nБаланс: <b>{new}</b>")
 
 
 # ============================================================
-# КОСТИ (ДУЭЛИ)
+# КОСТИ
 # ============================================================
-
 @dp.message(Command("кости"))
 async def cmd_dice(m: Message):
     p = (m.text or "").split(maxsplit=2)
-    if len(p) < 3:
-        await m.reply("Использование: <code>/кости @ник 100</code> — ответом или с ником.")
+    if len(p) < 2:
+        await m.reply("Использование: <code>/кости @ник 100</code> или ответом <code>/кости 100</code>")
         return
-
-    # Пытаемся понять, где @ник, а где ставка
     target = None
     bet = None
-
     if m.reply_to_message:
         target = m.reply_to_message.from_user
         try:
@@ -790,54 +733,41 @@ async def cmd_dice(m: Message):
             return
     else:
         if p[1].startswith("@"):
-            un = p[1].lstrip("@")
-            cursor.execute("SELECT user_id, username FROM users WHERE username=? AND chat_id=?", (un, m.chat.id))
-            row = cursor.fetchone()
+            row = find_user_by_username(p[1], m.chat.id)
             if not row:
-                await m.reply("Не нашёл такого. Пусть напишет что-нибудь в чат.")
+                await m.reply(f"Не нашёл {p[1]}. Пусть напишет что-нибудь в чат, или ответь на его сообщение.")
                 return
             tid, tn = row
             target = type("U", (), {"id": tid, "full_name": tn, "username": tn})()
             try:
                 bet = int(p[2])
-            except ValueError:
+            except (ValueError, IndexError):
                 await m.reply("Ставка должна быть числом.")
                 return
         else:
             await m.reply("Укажи @ник или ответь на сообщение.")
             return
-
     if target.id == m.from_user.id:
-        await m.reply("Себе вызов бросить нельзя 🙂")
+        await m.reply("Себе нельзя 🙂")
         return
-
     if bet < DICE_MIN_BET or bet > DICE_MAX_BET:
         await m.reply(f"Ставка от {DICE_MIN_BET} до {DICE_MAX_BET}.")
         return
-
-    # Проверка балансов обоих
-    my_balance = get_stars(m.from_user.id, m.chat.id)
-    his_balance = get_stars(target.id, m.chat.id)
-
-    if my_balance < bet:
-        await m.reply(f"У тебя только {my_balance} ⭐, а ставка {bet}.")
+    if get_stars(m.from_user.id, m.chat.id) < bet:
+        await m.reply("У тебя недостаточно звёзд.")
         return
-    if his_balance < bet:
-        await m.reply(f"У <b>{target.full_name}</b> только {his_balance} ⭐, а ставка {bet}.")
+    if get_stars(target.id, m.chat.id) < bet:
+        await m.reply(f"У <b>{target.full_name}</b> недостаточно звёзд.")
         return
-
-    # Сохраняем вызов
     pending_duels.setdefault(m.chat.id, {})[target.id] = {
         "challenger_id": m.from_user.id,
         "challenger_name": m.from_user.full_name,
         "bet": bet,
     }
-
     await m.reply(
-        f"🎲 <b>{m.from_user.full_name}</b> вызывает <b>{target.full_name}</b> на дуэль!\n"
+        f"🎲 <b>{m.from_user.full_name}</b> вызывает <b>{target.full_name}</b>\n"
         f"Ставка: <b>{bet}</b> ⭐\n\n"
-        f"<b>{target.full_name}</b>, чтобы принять — напиши <code>/принять</code>\n"
-        f"Чтобы отклонить — <code>/отклонить</code>"
+        f"<b>{target.full_name}</b>, напиши <code>/принять</code> или <code>/отклонить</code>."
     )
 
 
@@ -845,71 +775,49 @@ async def cmd_dice(m: Message):
 async def cmd_accept(m: Message):
     cid = m.chat.id
     uid = m.from_user.id
-
     if cid not in pending_duels or uid not in pending_duels[cid]:
         await m.reply("Тебе никто не бросал вызов.")
         return
-
     duel = pending_duels[cid].pop(uid)
-    challenger_id = duel["challenger_id"]
-    challenger_name = duel["challenger_name"]
+    ch_id = duel["challenger_id"]
+    ch_name = duel["challenger_name"]
     bet = duel["bet"]
-    acceptor_name = m.from_user.full_name
-
-    # Повторная проверка балансов
-    ch_balance = get_stars(challenger_id, cid)
-    ac_balance = get_stars(uid, cid)
-
-    if ch_balance < bet or ac_balance < bet:
-        await m.reply("У кого-то уже не хватает звёзд. Дуэль отменена.")
+    ac_name = m.from_user.full_name
+    if get_stars(ch_id, cid) < bet or get_stars(uid, cid) < bet:
+        await m.reply("У кого-то не хватает звёзд. Отменено.")
         return
-
-    # Бросок кубиков
-    roll_ch = random.randint(1, 6)
-    roll_ac = random.randint(1, 6)
-
-    if roll_ch > roll_ac:
-        # Победил вызывающий
-        new_ch = update_stars(challenger_id, cid, challenger_name, bet)
-        new_ac = update_stars(uid, cid, acceptor_name, -bet)
-        update_casino_stats(challenger_id, cid, won=bet)
+    r_ch = random.randint(1, 6)
+    r_ac = random.randint(1, 6)
+    if r_ch > r_ac:
+        new_ch = update_stars(ch_id, cid, ch_name, bet)
+        new_ac = update_stars(uid, cid, ac_name, -bet)
+        update_casino_stats(ch_id, cid, won=bet)
         update_casino_stats(uid, cid, lost=bet)
-        update_season_stat(challenger_id, cid, challenger_name, won=bet)
-        update_season_stat(uid, cid, acceptor_name, lost=bet)
-        add_log(cid, challenger_id, challenger_name, bet, f"кости vs {acceptor_name}")
-        add_log(cid, uid, acceptor_name, -bet, f"кости vs {challenger_name}")
+        update_season_stat(ch_id, cid, ch_name, won=bet)
+        update_season_stat(uid, cid, ac_name, lost=bet)
+        add_log(cid, ch_id, ch_name, bet, f"кости vs {ac_name}")
+        add_log(cid, uid, ac_name, -bet, f"кости vs {ch_name}")
         await m.reply(
-            f"🎲 <b>Дуэль</b>\n\n"
-            f"<b>{challenger_name}</b> выбросил: {roll_ch}\n"
-            f"<b>{acceptor_name}</b> выбросил: {roll_ac}\n\n"
-            f"🏆 Победил <b>{challenger_name}</b>! +{bet} ⭐\n"
-            f"Баланс {challenger_name}: <b>{new_ch}</b>\n"
-            f"Баланс {acceptor_name}: <b>{new_ac}</b>"
+            f"🎲 {ch_name}: {r_ch}\n🎲 {ac_name}: {r_ac}\n\n"
+            f"🏆 Победил <b>{ch_name}</b>! +{bet} ⭐\n"
+            f"Балансы: {ch_name} {new_ch} | {ac_name} {new_ac}"
         )
-    elif roll_ac > roll_ch:
-        new_ac = update_stars(uid, cid, acceptor_name, bet)
-        new_ch = update_stars(challenger_id, cid, challenger_name, -bet)
+    elif r_ac > r_ch:
+        new_ac = update_stars(uid, cid, ac_name, bet)
+        new_ch = update_stars(ch_id, cid, ch_name, -bet)
         update_casino_stats(uid, cid, won=bet)
-        update_casino_stats(challenger_id, cid, lost=bet)
-        update_season_stat(uid, cid, acceptor_name, won=bet)
-        update_season_stat(challenger_id, cid, challenger_name, lost=bet)
-        add_log(cid, uid, acceptor_name, bet, f"кости vs {challenger_name}")
-        add_log(cid, challenger_id, challenger_name, -bet, f"кости vs {acceptor_name}")
+        update_casino_stats(ch_id, cid, lost=bet)
+        update_season_stat(uid, cid, ac_name, won=bet)
+        update_season_stat(ch_id, cid, ch_name, lost=bet)
+        add_log(cid, uid, ac_name, bet, f"кости vs {ch_name}")
+        add_log(cid, ch_id, ch_name, -bet, f"кости vs {ac_name}")
         await m.reply(
-            f"🎲 <b>Дуэль</b>\n\n"
-            f"<b>{challenger_name}</b> выбросил: {roll_ch}\n"
-            f"<b>{acceptor_name}</b> выбросил: {roll_ac}\n\n"
-            f"🏆 Победил <b>{acceptor_name}</b>! +{bet} ⭐\n"
-            f"Баланс {challenger_name}: <b>{new_ch}</b>\n"
-            f"Баланс {acceptor_name}: <b>{new_ac}</b>"
+            f"🎲 {ch_name}: {r_ch}\n🎲 {ac_name}: {r_ac}\n\n"
+            f"🏆 Победил <b>{ac_name}</b>! +{bet} ⭐\n"
+            f"Балансы: {ch_name} {new_ch} | {ac_name} {new_ac}"
         )
     else:
-        await m.reply(
-            f"🎲 <b>Дуэль</b>\n\n"
-            f"<b>{challenger_name}</b> выбросил: {roll_ch}\n"
-            f"<b>{acceptor_name}</b> выбросил: {roll_ac}\n\n"
-            f"🤝 <b>Ничья!</b> Никто не теряет звёзды."
-        )
+        await m.reply(f"🎲 {ch_name}: {r_ch}\n🎲 {ac_name}: {r_ac}\n\n🤝 Ничья!")
 
 
 @dp.message(Command("отклонить"))
@@ -918,15 +826,14 @@ async def cmd_decline(m: Message):
     uid = m.from_user.id
     if cid in pending_duels and uid in pending_duels[cid]:
         pending_duels[cid].pop(uid)
-        await m.reply("❌ Вызов отклонён.")
+        await m.reply("❌ Отклонено.")
     else:
         await m.reply("Тебе никто не бросал вызов.")
 
 
 # ============================================================
-# КРАЖА ЗВЁЗД
+# КРАЖА
 # ============================================================
-
 @dp.message(Command("украсть"))
 async def cmd_steal(m: Message):
     target = None
@@ -935,291 +842,189 @@ async def cmd_steal(m: Message):
     else:
         p = (m.text or "").split(maxsplit=1)
         if len(p) >= 2 and p[1].startswith("@"):
-            un = p[1].lstrip("@")
-            cursor.execute("SELECT user_id, username FROM users WHERE username=? AND chat_id=?", (un, m.chat.id))
-            row = cursor.fetchone()
+            row = find_user_by_username(p[1], m.chat.id)
             if row:
                 tid, tn = row
                 target = type("U", (), {"id": tid, "full_name": tn, "username": tn})()
-
     if target is None:
         await m.reply("Использование: <code>/украсть</code> ответом или <code>/украсть @ник</code>")
         return
-
     if target.id == m.from_user.id:
         await m.reply("У себя красть нельзя 🙂")
         return
-
     if target.is_bot:
         await m.reply("У ботов красть нельзя 🙂")
         return
-
     thief_id = m.from_user.id
     thief_name = m.from_user.username or m.from_user.full_name
     cid = m.chat.id
-
-    # Проверка кулдауна
-    cursor.execute("""
-        SELECT last_steal FROM steal_cooldowns
-        WHERE thief_id=? AND target_id=? AND chat_id=?
-    """, (thief_id, target.id, cid))
+    cursor.execute("SELECT last_steal FROM steal_cooldowns WHERE thief_id=? AND target_id=? AND chat_id=?",
+                   (thief_id, target.id, cid))
     r = cursor.fetchone()
     if r:
         last = datetime.fromisoformat(r[0])
         if datetime.now() - last < timedelta(hours=STEAL_COOLDOWN_HOURS):
             left = timedelta(hours=STEAL_COOLDOWN_HOURS) - (datetime.now() - last)
-            h = left.seconds // 3600
-            mn = (left.seconds % 3600) // 60
-            await m.reply(f"⏱️ Ты уже грабил этого человека. Осталось: {h}ч {mn}м.")
+            await m.reply(f"⏱️ Осталось {left.seconds//3600}ч {(left.seconds%3600)//60}м.")
             return
-
-    target_balance = get_stars(target.id, cid)
-    if target_balance < STEAL_MIN_BALANCE:
-        await m.reply(f"У <b>{target.full_name}</b> меньше {STEAL_MIN_BALANCE} ⭐, грабить нечего.")
+    tbal = get_stars(target.id, cid)
+    if tbal < STEAL_MIN_BALANCE:
+        await m.reply(f"У <b>{target.full_name}</b> меньше {STEAL_MIN_BALANCE} ⭐.")
         return
-
-    # Записываем кулдаун сразу
     cursor.execute("""
         INSERT INTO steal_cooldowns (thief_id, target_id, chat_id, last_steal)
         VALUES (?, ?, ?, ?)
         ON CONFLICT(thief_id, target_id, chat_id) DO UPDATE SET last_steal=?
     """, (thief_id, target.id, cid, datetime.now().isoformat(), datetime.now().isoformat()))
     db.commit()
-
     if random.random() < STEAL_SUCCESS_CHANCE:
-        amount = random.randint(STEAL_MIN_AMOUNT, STEAL_MAX_AMOUNT)
-        amount = min(amount, target_balance)
-        update_stars(thief_id, cid, thief_name, amount)
-        new_target = update_stars(target.id, cid, target.full_name, -amount)
-        add_log(cid, thief_id, thief_name, amount, f"украл у {target.full_name}")
-        add_log(cid, target.id, target.full_name, -amount, f"обокрал {thief_name}")
-        await m.reply(
-            f"🥷 <b>Успех!</b>\n"
-            f"Ты украл <b>{amount}</b> ⭐ у <b>{target.full_name}</b>.\n"
-            f"У него осталось: <b>{new_target}</b> ⭐"
-        )
+        amt = random.randint(STEAL_MIN_AMOUNT, STEAL_MAX_AMOUNT)
+        amt = min(amt, tbal)
+        update_stars(thief_id, cid, thief_name, amt)
+        new_t = update_stars(target.id, cid, target.full_name, -amt)
+        add_log(cid, thief_id, thief_name, amt, f"украл у {target.full_name}")
+        add_log(cid, target.id, target.full_name, -amt, f"обокрал {thief_name}")
+        await m.reply(f"🥷 Успех! Украл <b>{amt}</b> ⭐ у {target.full_name}.\nУ него осталось {new_t} ⭐")
     else:
         update_stars(thief_id, cid, thief_name, -STEAL_FAIL_PENALTY)
-        await m.reply(
-            f"🚨 <b>Провал!</b>\n"
-            f"Тебя поймали и ты потерял <b>{STEAL_FAIL_PENALTY}</b> ⭐."
-        )
+        await m.reply(f"🚨 Провал! −{STEAL_FAIL_PENALTY} ⭐")
 
 
 # ============================================================
-# ЕЖЕНЕДЕЛЬНАЯ СВОДКА (вручную)
+# СВОДКА
 # ============================================================
-
 @dp.message(Command("сводка"))
 async def cmd_weekly(m: Message):
     await send_weekly_report(m.chat.id)
 
 
 async def send_weekly_report(chat_id: int):
-    # Берём данные за прошлую неделю (предыдущий сезон)
     prev_start = get_season_start() - timedelta(days=7)
     prev_end = get_season_start()
     season = prev_start.isoformat()
-
-    text = f"📊 <b>Сводка за неделю</b>\n"
-    text += f"({prev_start.strftime('%d.%m')} — {prev_end.strftime('%d.%m')})\n\n"
-
+    text = f"📊 <b>Сводка {prev_start.strftime('%d.%m')} — {prev_end.strftime('%d.%m')}</b>\n\n"
     cursor.execute("""
         SELECT user_id, good_words FROM season_stats
         WHERE chat_id=? AND season_start=? AND good_words > 0
         ORDER BY good_words DESC LIMIT 3
     """, (chat_id, season))
     rows = cursor.fetchall()
-    text += "✅ <b>Самые добрые:</b>\n"
-    if rows:
-        for i, (uid, gw) in enumerate(rows, start=1):
-            try:
-                mm = await bot.get_chat_member(chat_id, uid)
-                name = mm.user.full_name
-            except Exception:
-                name = f"ID {uid}"
-            text += f"  {i}. {name} — {gw} хороших слов\n"
-    else:
-        text += "  пусто\n"
-
+    text += "✅ Добрые:\n"
+    for i, (uid, gw) in enumerate(rows, start=1):
+        try:
+            mm = await bot.get_chat_member(chat_id, uid)
+            name = mm.user.full_name
+        except Exception:
+            name = f"ID {uid}"
+        text += f"  {i}. {name} — {gw}\n"
     cursor.execute("""
         SELECT user_id, bad_words FROM season_stats
         WHERE chat_id=? AND season_start=? AND bad_words > 0
         ORDER BY bad_words DESC LIMIT 3
     """, (chat_id, season))
     rows = cursor.fetchall()
-    text += "\n❌ <b>Самые злые:</b>\n"
-    if rows:
-        for i, (uid, bw) in enumerate(rows, start=1):
-            try:
-                mm = await bot.get_chat_member(chat_id, uid)
-                name = mm.user.full_name
-            except Exception:
-                name = f"ID {uid}"
-            text += f"  {i}. {name} — {bw} плохих слов\n"
-    else:
-        text += "  пусто\n"
-
-    cursor.execute("""
-        SELECT user_id, won, lost FROM season_stats
-        WHERE chat_id=? AND season_start=? AND (won > 0 OR lost > 0)
-        ORDER BY (won - lost) DESC LIMIT 3
-    """, (chat_id, season))
-    rows = cursor.fetchall()
-    text += "\n🎰 <b>Казино:</b>\n"
-    if rows:
-        for i, (uid, w, l) in enumerate(rows, start=1):
-            try:
-                mm = await bot.get_chat_member(chat_id, uid)
-                name = mm.user.full_name
-            except Exception:
-                name = f"ID {uid}"
-            diff = w - l
-            sign = "+" if diff >= 0 else ""
-            text += f"  {i}. {name} — {sign}{diff}\n"
-    else:
-        text += "  пусто\n"
-
-    # Топ по балансу
-    cursor.execute("""
-        SELECT user_id, username, stars FROM users
-        WHERE chat_id=? ORDER BY stars DESC LIMIT 3
-    """, (chat_id,))
-    rows = cursor.fetchall()
-    text += "\n⭐ <b>Топ по балансу:</b>\n"
-    if rows:
-        for i, (uid, un, st) in enumerate(rows, start=1):
-            try:
-                mm = await bot.get_chat_member(chat_id, uid)
-                name = mm.user.full_name
-            except Exception:
-                name = un or f"ID {uid}"
-            text += f"  {i}. {name} — {st} ⭐\n"
-    else:
-        text += "  пусто\n"
-
-    text += "\n📅 Новый сезон стартовал!"
-
+    text += "\n❌ Злые:\n"
+    for i, (uid, bw) in enumerate(rows, start=1):
+        try:
+            mm = await bot.get_chat_member(chat_id, uid)
+            name = mm.user.full_name
+        except Exception:
+            name = f"ID {uid}"
+        text += f"  {i}. {name} — {bw}\n"
     try:
         await bot.send_message(chat_id, text)
     except Exception as e:
-        print(f"[WEEKLY] Не смог отправить сводку в {chat_id}: {e}")
+        print(f"[WEEKLY] ошибка: {e}")
 
 
 # ============================================================
-# ГЛАВНЫЙ ОБРАБОТЧИК СООБЩЕНИЙ
+# АВТО-СЛОВА — ГЛАВНЫЙ ОБРАБОТЧИК
+# ВАЖНО: он должен быть В САМОМ КОНЦЕ, после всех команд!
 # ============================================================
-
 @dp.message(F.text)
 async def handle_message(message: Message):
-    if not message.from_user or message.from_user.is_bot:
-        return
-
-    user = message.from_user
-    text = message.text or ""
-    chat_id = message.chat.id
-    chat_type = message.chat.type
-
-    if chat_type in ("group", "supergroup"):
-        ensure_user(user.id, chat_id, user.username or user.full_name)
-
-    if text.startswith("/"):
-        return
-
-    if chat_type not in ("group", "supergroup"):
-        return
-
-    if not AUTO_STARS_ENABLED:
-        return
-
-    bad_w, bad_v = find_best_word(text, BAD_WORDS)
-    good_w, good_v = find_best_word(text, GOOD_WORDS)
-
-    if bad_w:
-        if same_word_used_recently(user.id, chat_id, bad_w, SAME_BAD_WORD_COOLDOWN_MINUTES):
+    try:
+        user = message.from_user
+        if not user or user.is_bot:
             return
-        delta = -bad_v
-        reason = f"авто: плохое «{bad_w}» (−{bad_v})"
-        inc_word_stat(user.id, chat_id, user.username or user.full_name, is_good=False)
-        update_season_stat(user.id, chat_id, user.username or user.full_name, bad=1)
-    elif good_w:
-        if plus_count_last_hour(user.id, chat_id) >= MAX_PLUS_PER_HOUR:
+
+        text = message.text or ""
+        chat_id = message.chat.id
+        chat_type = message.chat.type
+
+        # Диагностика — увидим в логах
+        print(f"[MSG] {user.full_name} | {chat_type} | {text!r}")
+
+        # Запоминаем только в группах
+        if chat_type in ("group", "supergroup"):
+            ensure_user(user.id, chat_id, user.username or user.full_name)
+
+        # Команды пропускаем
+        if text.startswith("/"):
             return
-        if plus_sum_last_day(user.id, chat_id) >= MAX_PLUS_PER_DAY:
+
+        # Не в группе — выходим
+        if chat_type not in ("group", "supergroup"):
+            print(f"[SKIP] не группа: {chat_type}")
             return
-        if same_word_used_recently(user.id, chat_id, good_w, SAME_WORD_COOLDOWN_HOURS * 60):
+
+        if not AUTO_STARS_ENABLED:
+            print("[SKIP] авто выключены")
             return
-        delta = good_v
-        reason = f"авто: хорошее «{good_w}» (+{good_v})"
-        inc_word_stat(user.id, chat_id, user.username or user.full_name, is_good=True)
-        update_season_stat(user.id, chat_id, user.username or user.full_name, good=1)
-    else:
-        return
 
-    new = update_stars(user.id, chat_id, user.username or user.full_name, delta)
-    add_log(chat_id, user.id, user.full_name, delta, reason)
+        bad_w, bad_v = find_best_word(text, BAD_WORDS)
+        good_w, good_v = find_best_word(text, GOOD_WORDS)
+        print(f"[FIND] good={good_w}(+{good_v}) bad={bad_w}(-{bad_v})")
 
-    if DEBUG_AUTO:
-        sign = "➕" if delta > 0 else "➖"
-        await message.reply(
-            f"{sign} <b>{user.full_name}</b>: {reason}\nБаланс: <b>{new}</b> ⭐"
-        )
+        if bad_w:
+            if same_word_used_recently(user.id, chat_id, bad_w, SAME_BAD_WORD_COOLDOWN_MINUTES):
+                print(f"[SKIP] плохое {bad_w} недавно")
+                return
+            delta = -bad_v
+            reason = f"авто: плохое «{bad_w}» (−{bad_v})"
+            inc_word_stat(user.id, chat_id, user.username or user.full_name, is_good=False)
+            update_season_stat(user.id, chat_id, user.username or user.full_name, bad=1)
+        elif good_w:
+            if plus_count_last_hour(user.id, chat_id) >= MAX_PLUS_PER_HOUR:
+                print("[SKIP] плюсовой лимит в час")
+                return
+            if plus_sum_last_day(user.id, chat_id) >= MAX_PLUS_PER_DAY:
+                print("[SKIP] плюсовой лимит в сутки")
+                return
+            if same_word_used_recently(user.id, chat_id, good_w, SAME_WORD_COOLDOWN_HOURS * 60):
+                print(f"[SKIP] хорошее {good_w} недавно")
+                return
+            delta = good_v
+            reason = f"авто: хорошее «{good_w}» (+{good_v})"
+            inc_word_stat(user.id, chat_id, user.username or user.full_name, is_good=True)
+            update_season_stat(user.id, chat_id, user.username or user.full_name, good=1)
+        else:
+            print("[SKIP] слов не найдено")
+            return
 
+        new = update_stars(user.id, chat_id, user.username or user.full_name, delta)
+        add_log(chat_id, user.id, user.full_name, delta, reason)
+        print(f"[OK] {user.full_name}: {delta}, баланс {new}")
 
-@dp.message(F.new_chat_members)
-async def welcome(message: Message):
-    for mem in message.new_chat_members:
-        if mem.is_bot:
-            continue
-        await message.answer(
-            f"👋 <b>{mem.full_name}</b>, добро пожаловать!\n\n"
-            f"Свои звёзды: /профиль\nТоп: /таблица"
-        )
+        if DEBUG_AUTO:
+            sign = "➕" if delta > 0 else "➖"
+            await message.reply(f"{sign} <b>{user.full_name}</b>: {reason}\nБаланс: <b>{new}</b> ⭐")
+
+    except Exception as e:
+        print(f"[ERROR] в handle_message: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 # ============================================================
-# АВТО-СВОДКА ПО ПЯТНИЦАМ
+# ЗАПУСК
 # ============================================================
-async def scheduler_loop():
-    """Раз в час проверяем: если наступила новая пятница и сводка не отправлена — отправляем."""
-    while True:
-        try:
-            now = datetime.now()
-            # Если сегодня пятница и время 00:00–01:00 — отправляем сводку
-            if now.weekday() == 4 and now.hour == 0:
-                # Проверяем, отправляли ли уже
-                cursor.execute("SELECT chat_id, last_report FROM last_weekly_report")
-                sent_chats = {r[0]: r[1] for r in cursor.fetchall()}
-
-                cursor.execute("SELECT DISTINCT chat_id FROM users")
-                for (cid,) in cursor.fetchall():
-                    last = sent_chats.get(cid)
-                    if last:
-                        last_dt = datetime.fromisoformat(last)
-                        if (now - last_dt) < timedelta(days=6):
-                            continue
-                    # Отправляем
-                    try:
-                        await send_weekly_report(cid)
-                    except Exception as e:
-                        print(f"[SCHED] Ошибка сводки в {cid}: {e}")
-                    cursor.execute("""
-                        INSERT INTO last_weekly_report (chat_id, last_report) VALUES (?, ?)
-                        ON CONFLICT(chat_id) DO UPDATE SET last_report=?
-                    """, (cid, now.isoformat(), now.isoformat()))
-                    db.commit()
-        except Exception as e:
-            print(f"[SCHED] Ошибка планировщика: {e}")
-        await asyncio.sleep(3600)  # раз в час
-
-
 async def main():
-    print("=" * 40)
+    print("=" * 50)
     print("Бот Добро-Звёзды запущен!")
     print(f"Авто-звёзды: {'ВКЛ' if AUTO_STARS_ENABLED else 'ВЫКЛ'}")
     print(f"Админов: {len(load_admins())}")
-    print("=" * 40)
-    asyncio.create_task(scheduler_loop())
+    print("=" * 50)
     await dp.start_polling(bot)
 
 
